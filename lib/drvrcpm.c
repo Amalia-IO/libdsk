@@ -1287,18 +1287,12 @@ static dsk_err_t rcpmfs_readdir(RCPMFS_DSK_DRIVER *self)
 				extsize = rcpmfs_extent_size(self);
 				if (extsize > filesize) extsize = filesize;
 				cpm_dirent[DIR_EX]  = (extent * (exm+1)) & 0x1F;
-				cpm_dirent[DIR_EX] |= ((extsize + 127) / 16384) & exm;
+				if (extsize) cpm_dirent[DIR_EX] |= ((extsize - 1) / 16384) & exm;
 				if (self->rc_fsversion == FSVERSION_ISX)
 					cpm_dirent[DIR_S1]  = (unsigned char)(128 - (filesize & 0x7F)) & 0x7F;
 				else	cpm_dirent[DIR_S1]  = (unsigned char)(filesize & 0x7F);
 				cpm_dirent[DIR_S2]  = (extent * (exm+1)) / 32;
-				cpm_dirent[DIR_RC]  = (unsigned char)((extsize + 127) / 128);
-/* Record counts > 0x80 imply a full extent of 0x80 records. So limit to 7 
- * bits if the extent is not actually full. */
-				if (cpm_dirent[DIR_RC] > 0x80)
-				{
-					cpm_dirent[DIR_RC] &= 0x7F;
-				}
+				cpm_dirent[DIR_RC]  = extsize ? (unsigned char)(((extsize - 1) / 128) % 128 + 1) : 0;
 				filesize -= extsize;
 				++extent;
 /* Add extent to the directory */

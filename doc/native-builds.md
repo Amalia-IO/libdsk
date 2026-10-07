@@ -47,7 +47,11 @@ pending partial-sector writes, sibling-file preservation, same-name
 recreation and truncation of case-sensitive host filenames.
 
 The deletion-buffer verifier checks 14 cases with 28 assertions, including both
-cached-append orderings and uncommitted cached sectors. The erase
+cached-append orderings and uncommitted cached sectors. Add `--extent-only` to
+check 13 host-imported file lengths at logical and physical extent boundaries,
+including EX/S2 and RC for every intermediate extent. Exact full extents must
+use RC=128 rather than wrapping to zero, and EX must identify the last occupied
+logical extent. The erase
 probe records three deletion orders; inspect its post-close snapshots to
 confirm file absence, not merely successful RPC replies.
 

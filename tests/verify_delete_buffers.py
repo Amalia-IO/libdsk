@@ -348,10 +348,43 @@ def run_pending_cached_case(probe: Any, bridge: Any, export: Path,
         rpc.close_handle()
 
 
+def run_extent_encoding_cases(probe: Any, bridge: Any, export: Path,
+                              evidence: Path) -> None:
+    for records in (0, 1, 127, 128, 129, 255, 256, 257, 511, 512, 513, 2048, 2049):
+        case = f"extent_records{records}"
+        target = export / "EXTENT.BIN"
+        payload = payload_for(records * 128, 17)
+        target.write_bytes(payload)
+        rpc = probe.NativeRPC(bridge, evidence / "events.jsonl", evidence, case)
+        try:
+            rpc.open(export)
+            extents = find_extents(rpc, target.name, case)
+            expected_count = max(1, (records + 255) // 256)
+            if len(extents) != expected_count:
+                raise ProbeError(f"{case}: expected {expected_count} extents, got {len(extents)}")
+            for index, extent in enumerate(extents):
+                extent_records = min(256, max(0, records - index * 256))
+                expected_extent = index * 2 + (extent_records - 1) // 128 if extent_records else 0
+                expected_rc = (extent_records - 1) % 128 + 1 if extent_records else 0
+                if (extent["extent_number"], extent["RC"]) != (expected_extent, expected_rc):
+                    raise ProbeError(
+                        f"{case}: extent {index} EX/S2={extent['extent_number']} RC={extent['RC']}; "
+                        f"expected EX/S2={expected_extent} RC={expected_rc}")
+            rpc.close_handle()
+            if bridge.process.wait(timeout=2) != 0:
+                raise ProbeError(f"{case}: native backend failed after close")
+            assert_file(target, payload, f"{case}: import and close preserve bytes")
+        finally:
+            rpc.close_handle()
+        target.unlink()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--forkslave", type=Path, required=True)
     parser.add_argument("--library", type=Path, help="native library path recorded in evidence")
+    parser.add_argument("--extent-only", action="store_true",
+                        help="check host-imported directory extent encoding only")
     args = parser.parse_args()
 
     probe = load_probe_module()
@@ -371,6 +404,12 @@ def main() -> int:
         server_module = probe.load_native_backend()
         bridge = server_module.ForkslaveBridge(str(forkslave), str(export))
         bridge.start()
+
+        if args.extent_only:
+            run_extent_encoding_cases(probe, bridge, export, evidence)
+            print(json.dumps({"event": "extent_encoding_complete", "cases": 13,
+                              "evidence": str(evidence)}, sort_keys=True), flush=True)
+            return 0
 
         for size, case, order in (
             (17 * 128, "records17_primary", (0,)),
