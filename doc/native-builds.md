@@ -26,18 +26,24 @@ mkdir -p ../libdsk-build/linux-x86_64
 cd ../libdsk-build/linux-x86_64
 "$source_directory/configure" --prefix="$PWD/install"
 make -j4
+backend="/absolute/path/to/validated/native-rpc-backend"
+export LD_LIBRARY_PATH="$PWD/lib/.libs${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 python3 "$source_directory/tests/verify_delete_buffers.py" \
-  --forkslave "$PWD/tools/forkslave" \
+  --forkslave "$backend" \
+  --library "$PWD/lib/.libs/libdsk.so.5.4.2"
+python3 "$source_directory/tests/verify_delete_buffers.py" \
+  --forkslave "$backend" --extent-only \
   --library "$PWD/lib/.libs/libdsk.so.5.4.2"
 python3 "$source_directory/tests/rcpmfs_erase_probe.py" \
-  --forkslave "$PWD/tools/forkslave" \
+  --forkslave "$backend" \
   --library "$PWD/lib/.libs/libdsk.so.5.4.2"
 ```
 
 Do not run `make install` into system locations when validating a candidate.
-The generated `tools/forkslave` libtool wrapper selects the build's library.
-Running `tools/.libs/forkslave` directly can select a different installed
-library with the same SONAME.
+This repository builds the library, not an application-specific RPC backend.
+Supply a compatible backend built against the matching headers and library.
+Check `ldd "$backend"` with the selected library path before testing; otherwise
+a different installed library with the same SONAME may be loaded.
 
 ## Regression Checks
 
@@ -51,7 +57,9 @@ cached-append orderings and uncommitted cached sectors. Add `--extent-only` to
 check 13 host-imported file lengths at logical and physical extent boundaries,
 including EX/S2 and RC for every intermediate extent. Exact full extents must
 use RC=128 rather than wrapping to zero, and EX must identify the last occupied
-logical extent. The erase
+logical extent. Add `--profile-crlf` to either verifier mode to repeat the
+checks with a Windows-style CRLF configuration on any host; named format values
+must parse identically with LF and CRLF. The erase
 probe records three deletion orders; inspect its post-close snapshots to
 confirm file absence, not merely successful RPC replies.
 

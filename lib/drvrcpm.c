@@ -372,7 +372,7 @@ static dsk_err_t rcpmfs_option(RCPMFS_DSK_DRIVER *self, char *variable,
 	while (*value == ' ') ++value;
 	s = strchr(value, ' ');
 	if (s) *s = 0;
-	s = strchr(value, '\n');
+	s = strpbrk(value, "\r\n");
 	if (s) *s = 0;
 
 	if (!strcmp(variable, "blocksize") && atoi(value)) 

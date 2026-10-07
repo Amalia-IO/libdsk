@@ -385,6 +385,8 @@ def main() -> int:
     parser.add_argument("--library", type=Path, help="native library path recorded in evidence")
     parser.add_argument("--extent-only", action="store_true",
                         help="check host-imported directory extent encoding only")
+    parser.add_argument("--profile-crlf", action="store_true",
+                        help="write the disposable profile with Windows CRLF line endings")
     args = parser.parse_args()
 
     probe = load_probe_module()
@@ -397,7 +399,8 @@ def main() -> int:
     evidence = forkslave.parent / f"delete-buffer-{run_id}-evidence"
     export.mkdir()
     evidence.mkdir()
-    (export / ".libdsk.ini").write_text(probe.CONFIG_TEXT, encoding="ascii", newline="\n")
+    config_text = probe.CONFIG_TEXT.replace("\n", "\r\n") if args.profile_crlf else probe.CONFIG_TEXT
+    (export / ".libdsk.ini").write_text(config_text, encoding="ascii", newline="\n")
 
     bridge = None
     try:
