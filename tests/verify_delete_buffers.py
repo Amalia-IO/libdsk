@@ -250,6 +250,104 @@ def run_truncate_case(probe: Any, bridge: Any, export: Path, evidence: Path) -> 
         rpc.close_handle()
 
 
+def run_cached_append_case(probe: Any, bridge: Any, export: Path,
+                           evidence: Path, directory_first: bool) -> None:
+    case = "cached_append_directory_first" if directory_first else "cached_append_data_first"
+    target = export / ("APPEND1.BIN" if directory_first else "APPEND2.BIN")
+    original = payload_for(41 * 128, 0x35)
+    updated = payload_for(42 * 128, 0x35)
+    target.write_bytes(original)
+    rpc = probe.NativeRPC(bridge, evidence / "events.jsonl", evidence, case)
+    try:
+        rpc.open(export)
+        extents = find_extents(rpc, target.name, f"{case}_before")
+        file_offset = len(original) - (len(original) % SECTOR_SIZE)
+        extent_index, within_extent = divmod(file_offset, EXTENT_SIZE)
+        block_index, within_block = divmod(within_extent, BLOCK_SIZE)
+        extent_blocks = extents[extent_index]["allocation_blocks"]
+        if block_index >= len(extent_blocks):
+            raise ProbeError(f"{case}: append offset has no allocation block")
+        sectors_per_block = BLOCK_SIZE // SECTOR_SIZE
+        sector_in_block = within_block // SECTOR_SIZE
+        data_sector = extent_blocks[block_index] * sectors_per_block + sector_in_block
+        sector_data = bytearray(rpc.pread(data_sector))
+        rpc.pwrite(data_sector, bytes(sector_data))
+
+        extent = extents[extent_index]
+        directory_sector = bytearray(rpc.pread(extent["directory_sector"]))
+        entry_offset = extent["offset_in_sector"]
+        if directory_sector[entry_offset + 15] != 41:
+            raise ProbeError(f"{case}: expected RC=41 before append")
+        directory_sector[entry_offset + 15] = 42
+        sector_data[:len(updated) - file_offset] = updated[file_offset:]
+        if directory_first:
+            rpc.pwrite(extent["directory_sector"], bytes(directory_sector))
+            rpc.pwrite(data_sector, bytes(sector_data))
+        else:
+            rpc.pwrite(data_sector, bytes(sector_data))
+            assert_file(target, original, f"{case}: uncommitted append remains buffered")
+            rpc.pwrite(extent["directory_sector"], bytes(directory_sector))
+        assert_file(target, updated, f"{case}: appended bytes immediately visible")
+
+        cached = rpc.pread(data_sector)
+        if cached != bytes(sector_data):
+            raise ProbeError(f"{case}: cached native sector does not contain appended bytes")
+        print(json.dumps({"event": "assertion_pass",
+                          "label": f"{case}: native cached readback",
+                          "sha256": hashlib.sha256(cached).hexdigest()}, sort_keys=True),
+              flush=True)
+        rpc.close_handle()
+    finally:
+        rpc.close_handle()
+
+
+def run_pending_cached_case(probe: Any, bridge: Any, export: Path,
+                            evidence: Path, zero_length_owner: bool) -> None:
+    case = "cached_zero_length_owner" if zero_length_owner else "cached_unallocated_sector"
+    rpc = probe.NativeRPC(bridge, evidence / "events.jsonl", evidence, case)
+    target = export / "PENDING.BIN"
+    if zero_length_owner:
+        target.write_bytes(payload_for(128, 0x63))
+    try:
+        rpc.open(export)
+        if zero_length_owner:
+            extent = find_extents(rpc, target.name, f"{case}_before")[0]
+            data_sector = extent["allocation_blocks"][0] * (BLOCK_SIZE // SECTOR_SIZE)
+            rpc.pwrite(data_sector, rpc.pread(data_sector))
+            directory_sector = bytearray(rpc.pread(extent["directory_sector"]))
+            entry_offset = extent["offset_in_sector"]
+            directory_sector[entry_offset + 13] = 0
+            directory_sector[entry_offset + 15] = 0
+            rpc.pwrite(extent["directory_sector"], bytes(directory_sector))
+        else:
+            data_sector = probe.TOTAL_BLOCKS * (BLOCK_SIZE // SECTOR_SIZE) - 1
+            rpc.pwrite(data_sector, payload_for(SECTOR_SIZE, 0x45))
+        before = {path.name: path.read_bytes() for path in export.iterdir() if path.is_file()}
+        updated = payload_for(SECTOR_SIZE, 0xA8)
+        rpc.pwrite(data_sector, updated)
+        after = {path.name: path.read_bytes() for path in export.iterdir() if path.is_file()}
+        if before != after:
+            raise ProbeError(f"{case}: buffered write changed the host export")
+        if zero_length_owner:
+            assert_file(target, b"", f"{case}: zero valid bytes stay buffered")
+        else:
+            print(json.dumps({"event": "assertion_pass",
+                              "label": f"{case}: host export unchanged"}, sort_keys=True),
+                  flush=True)
+        if rpc.pread(data_sector) != updated:
+            raise ProbeError(f"{case}: pending sector contents were not retained")
+        print(json.dumps({"event": "assertion_pass",
+                          "label": f"{case}: pending native readback"}, sort_keys=True),
+              flush=True)
+        if zero_length_owner:
+            directory_sector[entry_offset + 15] = 1
+            rpc.pwrite(extent["directory_sector"], bytes(directory_sector))
+            assert_file(target, updated[:128], f"{case}: committed prefix later flushed")
+        rpc.close_handle()
+    finally:
+        rpc.close_handle()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--forkslave", type=Path, required=True)
@@ -288,7 +386,19 @@ def main() -> int:
         run_sibling_case(probe, bridge, export, evidence)
         run_recreate_case(probe, bridge, export, evidence)
         run_truncate_case(probe, bridge, export, evidence)
-        print(json.dumps({"event": "probe_complete", "cases": 10, "assertions": 18,
+        run_cached_append_case(probe, bridge, export, evidence, directory_first=True)
+        if bridge.process.wait(timeout=2) != 0:
+            raise ProbeError("Native backend failed after directory-first append")
+        run_cached_append_case(probe, bridge, export, evidence, directory_first=False)
+        if bridge.process.wait(timeout=2) != 0:
+            raise ProbeError("Native backend failed after data-first append")
+        run_pending_cached_case(probe, bridge, export, evidence, zero_length_owner=True)
+        if bridge.process.wait(timeout=2) != 0:
+            raise ProbeError("Native backend failed after zero-length owner case")
+        run_pending_cached_case(probe, bridge, export, evidence, zero_length_owner=False)
+        if bridge.process.wait(timeout=2) != 0:
+            raise ProbeError("Native backend failed after unallocated sector case")
+        print(json.dumps({"event": "probe_complete", "cases": 14, "assertions": 28,
                           "export": str(export), "evidence": str(evidence),
                           "forkslave": str(forkslave),
                           "dll_sha256": hashlib.sha256(

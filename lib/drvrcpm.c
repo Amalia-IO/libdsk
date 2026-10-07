@@ -2148,6 +2148,14 @@ dsk_err_t rcpmfs_write(DSK_DRIVER *self, const DSK_GEOMETRY *geom,
 	{
 		RTRACE(("Write: Write to buffer %p\n", buffer));
 		memcpy(buffer, buf, rcself->rc_geom.dg_secsize);
+		/* A directory update may have extended this cached sector. Write the
+		 * now-valid file prefix instead of leaving the new data only in memory. */
+		err = rcpmfs_psfind2(rcself, &filename, &offset, lsect, &bufsize);
+		if (err) return err;
+		if (filename && bufsize)
+		{
+			return rcpmfs_writefile(rcself, filename, offset, buffer, bufsize);
+		}
 		RTRACE(("rcpmfs_write: Wrote %02x %02x %02x\n",
 			buffer[0], buffer[1], buffer[2]));
 		return DSK_ERR_OK;

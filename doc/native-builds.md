@@ -46,7 +46,8 @@ do not require a running TCP server or hardware. They cover deletion order,
 pending partial-sector writes, sibling-file preservation, same-name
 recreation and truncation of case-sensitive host filenames.
 
-The deletion-buffer verifier checks 10 cases with 18 assertions. The erase
+The deletion-buffer verifier checks 14 cases with 28 assertions, including both
+cached-append orderings and uncommitted cached sectors. The erase
 probe records three deletion orders; inspect its post-close snapshots to
 confirm file absence, not merely successful RPC replies.
 
