@@ -584,6 +584,120 @@ static dsk_err_t rcpmfs_writebuffer(RCPMFS_DSK_DRIVER *self,
 }
 
 
+static int rcpmfs_same_file(const unsigned char *left, const unsigned char *right)
+{
+	int n;
+
+	if (left[0] != right[0]) return 0;
+	for (n = 1; n < 12; n++)
+	{
+		if ((left[n] & 0x7F) != (right[n] & 0x7F)) return 0;
+	}
+	return 1;
+}
+
+static unsigned rcpmfs_dirent_extent(RCPMFS_DSK_DRIVER *self,
+		const unsigned char *dirent)
+{
+	unsigned exm = rcpmfs_get_exm(self);
+
+	return ((dirent[DIR_EX] & 0x1F) + (dirent[DIR_S2] * 32)) / (exm + 1);
+}
+
+unsigned char *rcpmfs_lookup(RCPMFS_DSK_DRIVER *self, unsigned blockno,
+		unsigned long *diroffs, char *filename);
+
+static dsk_err_t rcpmfs_collect_file_buffers(RCPMFS_DSK_DRIVER *self,
+		const unsigned char *deleted, int whole_file,
+		RCPMFS_BUFFER ***matches, unsigned *match_count)
+{
+	unsigned long dir_sectors = 0, diroffs = 0;
+	unsigned capacity = 0, secperblock = 0;
+	unsigned char *owner;
+	char filename[17] = {0};
+	RCPMFS_BUFFER *rcb;
+
+	if (!self || !deleted || !matches || !match_count) return DSK_ERR_BADPTR;
+	*matches = NULL;
+	*match_count = 0;
+	secperblock = rcpmfs_secperblock(self);
+	if (!secperblock) return DSK_ERR_ECHECK;
+	dir_sectors = (unsigned long)secperblock * self->rc_dirblocks;
+	for (rcb = self->rc_bufhead; rcb; rcb = rcb->rcb_next)
+	{
+		if (rcb->rcb_lsect >= dir_sectors) ++capacity;
+	}
+	if (!capacity) return DSK_ERR_OK;
+	*matches = dsk_malloc(capacity * sizeof(**matches));
+	if (!*matches) return DSK_ERR_NOMEM;
+	for (rcb = self->rc_bufhead; rcb; rcb = rcb->rcb_next)
+	{
+		if (rcb->rcb_lsect < dir_sectors) continue;
+		filename[0] = '\0';
+		owner = rcpmfs_lookup(self, (unsigned)(rcb->rcb_lsect / secperblock),
+				&diroffs, filename);
+		if (owner && rcpmfs_same_file(owner, deleted) &&
+				(whole_file || rcpmfs_dirent_extent(self, owner) ==
+				 rcpmfs_dirent_extent(self, deleted)))
+		{
+			(*matches)[(*match_count)++] = rcb;
+		}
+	}
+	return DSK_ERR_OK;
+}
+
+static void rcpmfs_discard_collected_buffers(RCPMFS_DSK_DRIVER *self,
+		RCPMFS_BUFFER **matches, unsigned match_count)
+{
+	unsigned n;
+	RCPMFS_BUFFER **link;
+
+	for (n = 0; n < match_count; n++)
+	{
+		link = &self->rc_bufhead;
+		while (*link && *link != matches[n]) link = &(*link)->rcb_next;
+		if (*link)
+		{
+			*link = matches[n]->rcb_next;
+			dsk_free(matches[n]);
+		}
+	}
+	if (matches) dsk_free(matches);
+}
+
+static dsk_err_t rcpmfs_discard_file_buffers(RCPMFS_DSK_DRIVER *self,
+		const unsigned char *deleted, int whole_file)
+{
+	RCPMFS_BUFFER **matches = NULL;
+	unsigned match_count = 0;
+	dsk_err_t err;
+
+	err = rcpmfs_collect_file_buffers(self, deleted, whole_file,
+			&matches, &match_count);
+	if (err) return err;
+	rcpmfs_discard_collected_buffers(self, matches, match_count);
+	return DSK_ERR_OK;
+}
+
+static dsk_err_t rcpmfs_unlink_file(RCPMFS_DSK_DRIVER *self,
+		const unsigned char *deleted, const char *filename)
+{
+	RCPMFS_BUFFER **matches = NULL;
+	unsigned match_count = 0;
+	dsk_err_t err;
+
+	err = rcpmfs_collect_file_buffers(self, deleted, 1,
+			&matches, &match_count);
+	if (err) return err;
+	if (remove(rcpmfs_mkname(self, filename)))
+	{
+		if (matches) dsk_free(matches);
+		return DSK_ERR_RDONLY;
+	}
+	rcpmfs_discard_collected_buffers(self, matches, match_count);
+	return DSK_ERR_OK;
+}
+
 /* If seeking to write, make sure that the file is at least 'offset' bytes
  * long. */
 static dsk_err_t rcpmfs_wrseek(FILE *fp, unsigned long offset)
@@ -1791,8 +1905,14 @@ static dsk_err_t rcpmfs_chgdir(RCPMFS_DSK_DRIVER *self,
 	{
 		strcpy(realname, self->rc_namemap+ NAMEMAP_ENTRYSIZE* entryno);
 		RTRACE(("Unlink file: '%s'\n", realname));
-		if (remove(rcpmfs_mkname(self,realname))) return DSK_ERR_RDONLY;
+		err = rcpmfs_unlink_file(self, old, realname);
+		if (err) return err;
 		return rcpmfs_write_dirent(self, entryno, new, NULL);
+	}
+	else if (old[0] < 0x10 && new[0] >= 0x10 && oldextent != 0)
+	{
+		err = rcpmfs_discard_file_buffers(self, old, 0);
+		if (err) return err;
 	}
 #if defined (HAVE_UTIME_H) || defined (HAVE_SYS_UTIME_H)
 /* Timestamps. If writing back altered timestamps, and time stamping is 
@@ -1879,14 +1999,14 @@ RTRACE(("Rename '%s' as '%s'", realname, newname));
 	}
 	if (newlen < oldlen)
 	{
-		rcpmfs_cpmname(new, realname);
+		strcpy(realname, self->rc_namemap + NAMEMAP_ENTRYSIZE * entryno);
 		RTRACE(("Reduce file size: %s oldlen=%ld newlen=%ld\n", rcpmfs_mkname(self,realname), oldlen, newlen));
 		err = rcpmfs_adjust_size(self, oldlen - newlen, new[DIR_S1], rcpmfs_mkname(self,realname));
 	}
 /* File remains roughly, the same size, but Last Record Byte Count tweaked. */
 	else if (old[DIR_S1] != new[DIR_S1] && (newextent == 0))	
 	{
-		rcpmfs_cpmname(new, realname);
+		strcpy(realname, self->rc_namemap + NAMEMAP_ENTRYSIZE * entryno);
 		err = rcpmfs_adjust_size(self, 0, new[DIR_S1], rcpmfs_mkname(self,realname));
 	}
 	return DSK_ERR_OK;

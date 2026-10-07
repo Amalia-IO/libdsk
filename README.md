@@ -73,6 +73,11 @@ The [win32vc6](win32vc6/) directory contains the Visual C++ 6 project and
 workspace files. Consult the installation instructions for the other supplied
 platform builds.
 
+## Native Library Builds
+
+See the [native build guide](doc/native-builds.md) for the Windows x86 CMake
+library target, out-of-tree Linux builds and isolated library regression checks.
+
 ## Documentation
 
 - [Library manual](doc/libdsk.txt): API, formats, filesystem backends and limitations.
